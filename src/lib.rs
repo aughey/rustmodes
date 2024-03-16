@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 pub mod future_helper;
 
 // Define the different state types
-struct Configure;
+struct Configured;
 struct Operate;
 struct Standby;
 struct Uninitialized;
@@ -65,6 +65,7 @@ impl Radio<Uninitialized> {
             state: PhantomData,
         }
     }
+    // For testing so I can simulate a radio that might not be ready
     pub fn new_init(count: u32) -> Self {
         Radio {
             data: RadioData::new(count),
@@ -72,10 +73,10 @@ impl Radio<Uninitialized> {
         }
     }
 
-    /// Attempt to establish contact with the radio and entire standby if
-    /// successful.
+    /// Attempt to establish contact with the radio and return a standby radio if successful.
+    /// This might check hardware registers, try a handshake with the radio, etc.
     pub async fn standby(mut self) -> Result<Radio<Standby>, RadioError<Self>> {
-        // We use this init_count to simulate a radio that might not be ready
+        // We use this init_count to simulate a radio that might not be ready for testing
         if self.data.init_count > 0 {
             self.data.init_count -= 1;
             return Err(RadioError {
@@ -93,9 +94,18 @@ impl Radio<Uninitialized> {
     }
 }
 
-impl Radio<Configure> {
-    pub async fn operate(self) -> Result<Radio<Operate>, RadioError<Self>> {
-        // Perform operate actions here
+/// Data that might be needed to configure the radio.
+/// Frequencies, power, etc.
+#[derive(Default)]
+struct ConfigureData;
+
+impl Radio<Standby> {
+    /// Attempt to configure the radio with the given data
+    pub async fn configure(
+        self,
+        _configdata: ConfigureData,
+    ) -> Result<Radio<Configured>, RadioError<Self>> {
+        // Perform configuration actions here
         //tokio::time::sleep(Duration::from_secs(1)).await;
 
         Ok(Radio {
@@ -103,7 +113,20 @@ impl Radio<Configure> {
             state: PhantomData,
         })
     }
-    // and back to standby
+}
+
+impl Radio<Configured> {
+    /// Attempt to transition to operated mode from this configured mode.
+    pub async fn operate(self) -> Result<Radio<Operate>, RadioError<Self>> {
+        // Perform operate transition actions here
+        //tokio::time::sleep(Duration::from_secs(1)).await;
+
+        Ok(Radio {
+            data: self.data,
+            state: PhantomData,
+        })
+    }
+    // Can go back to standby without error (maybe need error given some other implementation).
     pub async fn enter_standby(self) -> Radio<Standby> {
         // Perform standby actions here
 
@@ -114,31 +137,14 @@ impl Radio<Configure> {
     }
 }
 
-#[derive(Default)]
-struct ConfigureData;
-
-impl Radio<Standby> {
-    pub async fn configure(
-        self,
-        _configdata: ConfigureData,
-    ) -> Result<Radio<Configure>, RadioError<Self>> {
-        //println!("Radio is in Configure mode");
-        // Perform configuration actions here
-        //tokio::time::sleep(Duration::from_secs(1)).await;
-        //println!("Configuration complete");
-        Ok(Radio {
-            data: self.data,
-            state: PhantomData,
-        })
-    }
-}
-
 impl Radio<Operate> {
+    /// can only send data in operate mode, might fail.
     pub async fn send_data(&self, _data: &[u8]) -> Result<()> {
         //println!("Sending data in operate mode");
         // Perform operate actions here
         Ok(())
     }
+    /// Go back to standby
     pub async fn enter_standby(self) -> Radio<Standby> {
         //println!("Entering Standby mode");
         // Perform standby actions here
@@ -152,8 +158,6 @@ impl Radio<Operate> {
 #[cfg(test)]
 mod tests {
     use std::{future::Future, time::Duration};
-
-    use tokio::task::yield_now;
 
     use self::future_helper::*;
     use super::*;
@@ -171,15 +175,15 @@ mod tests {
         // Start in uninitialized.  This is the only way we can create a radio.
         let radio = Radio::<Uninitialized>::new();
         // Must transition to standby first, this sets up the initial communication with the radio.
-        let radio = radio.standby().await?;
+        let standby_radio = radio.standby().await?;
         // Transition to configure given the supplied configuration data.
-        let radio = radio.configure(ConfigureData::default()).await?;
+        let configured_radio = standby_radio.configure(ConfigureData::default()).await?;
         // From configure, we can transition to operate (or back to standby)
-        let radio = radio.operate().await?;
+        let operate_radio = configured_radio.operate().await?;
         // Try sending data in operate mode
-        radio.send_data(&[1, 2, 3]).await?;
+        operate_radio.send_data(&[1, 2, 3]).await?;
         // Done, go back to standby
-        let _radio = radio.enter_standby().await;
+        let _radio = operate_radio.enter_standby().await;
         Ok(())
     }
 
@@ -233,7 +237,7 @@ mod tests {
                     // Bad day, try again
                     // yield because we don't ever actually await for anything.
                     // Necessary because we need to allow other tasks to run.
-                    yield_now().await;
+                    tokio::task::yield_now().await;
                     // The prior radio is in the error struct, so pull it out and try again
                     radio = e.radio;
                 }
