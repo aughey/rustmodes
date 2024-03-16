@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::marker::PhantomData;
+pub mod future_helper;
 
 // Define the different state types
 struct Configure;
@@ -152,9 +153,12 @@ impl Radio<Operate> {
 mod tests {
     use std::{future::Future, time::Duration};
 
+    use tokio::task::yield_now;
+
+    use self::future_helper::*;
     use super::*;
 
-    /// Our radio, through this type system and ownership transfer, will transition from
+    /// Our radio, using the type system and ownership transfer, will transition from
     ///
     /// Uninitialized -> Standby -> Configure -> Operate
     ///
@@ -166,11 +170,11 @@ mod tests {
     async fn test_radio() -> anyhow::Result<()> {
         // Start in uninitialized.  This is the only way we can create a radio.
         let radio = Radio::<Uninitialized>::new();
-        // Must transition to standby first
+        // Must transition to standby first, this sets up the initial communication with the radio.
         let radio = radio.standby().await?;
-        // Must transition to configure
+        // Transition to configure given the supplied configuration data.
         let radio = radio.configure(ConfigureData::default()).await?;
-        // From configure, we can transition to operate
+        // From configure, we can transition to operate (or back to standby)
         let radio = radio.operate().await?;
         // Try sending data in operate mode
         radio.send_data(&[1, 2, 3]).await?;
@@ -179,8 +183,9 @@ mod tests {
         Ok(())
     }
 
+    // Show how we might loop continuously to get into standby.
     #[tokio::test]
-    async fn show_looping_init() -> anyhow::Result<()> {
+    async fn test_looping_init() -> anyhow::Result<()> {
         let radio = Radio::<Uninitialized>::new_init(2);
 
         // Loop as many times as needed to get into standby mode (it might not be ready)
@@ -216,17 +221,19 @@ mod tests {
         Ok(())
     }
 
-    // Try to enter standby mode continuously until successful
-    async fn try_enter_standby(radio: Radio<Uninitialized>) -> Radio<Standby> {
+    /// Try to enter standby mode continuously until successful.
+    /// We write this as a function, we don't pollute the Radio implementation.
+    async fn try_enter_standby_forever(mut radio: Radio<Uninitialized>) -> Radio<Standby> {
         // Loop as many times as needed to get into standby mode (it might not be ready)
-        let mut radio = radio;
         loop {
             // Try to go into standby
             match radio.standby().await {
                 Ok(radio) => break radio,
                 Err(e) => {
                     // Bad day, try again
-                    //println!("Error configuring radio: {}", e);
+                    // yield because we don't ever actually await for anything.
+                    // Necessary because we need to allow other tasks to run.
+                    yield_now().await;
                     // The prior radio is in the error struct, so pull it out and try again
                     radio = e.radio;
                 }
@@ -234,53 +241,73 @@ mod tests {
         }
     }
 
-    /// Return type of wait_for_one_to_complete indicating which future completed before the other.
-    pub enum FirstOrSecond<A, B> {
-        First(A),
-        Second(B),
-    }
-
-    /// Wait for one of the two futures to complete and return which one completed first.
-    /// This is a wrapper around the select function from the futures crate for the common
-    /// case of returning just an output item - dropping both futures at the completion of one.
-    pub async fn wait_for_one_to_complete<Fut1, Fut2, Out1, Out2>(
-        fut1: Fut1,
-        fut2: Fut2,
-    ) -> FirstOrSecond<Out1, Out2>
-    where
-        Fut1: Future<Output = Out1>,
-        Fut2: Future<Output = Out2>,
-    {
-        use futures::future::{self, Either};
-        match future::select(std::pin::pin!(fut1), std::pin::pin!(fut2)).await {
-            Either::Left((value_1, _)) => FirstOrSecond::First(value_1),
-            Either::Right((value_2, _)) => FirstOrSecond::Second(value_2),
-        }
-    }
-
     #[tokio::test]
     async fn test_looping_standby() -> Result<()> {
         let radio = Radio::<Uninitialized>::new_init(2);
-        let _radio = try_enter_standby(radio).await;
+        let _radio = try_enter_standby_forever(radio).await;
         Ok(())
     }
 
-    async fn try_enter_standby_until<T>(
+    /// Try to enter standby mode continuously unless a timeout future completes first.
+    async fn try_enter_standby_until<E>(
         radio: Radio<Uninitialized>,
-        timeout: impl Future<Output = T>,
-    ) -> Result<Radio<Standby>> {
-        match wait_for_one_to_complete(try_enter_standby(radio), timeout).await {
+        timeout: impl Future<Output = E>,
+    ) -> Result<Radio<Standby>, E> {
+        match wait_for_one_to_complete(try_enter_standby_forever(radio), timeout).await {
             FirstOrSecond::First(r) => Ok(r),
-            FirstOrSecond::Second(_) => Err(anyhow::anyhow!("Timeout waiting for standby")),
+            FirstOrSecond::Second(e) => Err(e),
         }
     }
 
     #[tokio::test]
     async fn test_timeout_standby() -> Result<()> {
         let radio = Radio::<Uninitialized>::new_init(2);
-        let _radio =
-            try_enter_standby_until(radio, tokio::time::sleep(Duration::from_secs(5))).await?;
+        // Create our timeout future, we try for 5 seconds then give up
+        let timeout = async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            anyhow::anyhow!("Timeout waiting for standby")
+        };
+        let _radio = try_enter_standby_until(radio, timeout).await?;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_timeout_from_other_event() -> Result<()> {
+        // Create a oneshot channel that represents some sort of cancellation button having been pressed.
+        let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let cancel = async {
+            // The button press message indiciates that a timeout was requested
+            _ = rx.await;
+            anyhow::anyhow!("Cancel requested from the user")
+        };
+
+        let radio = Radio::<Uninitialized>::new_init(2);
+        let _radio = try_enter_standby_until(radio, cancel).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_timeout_from_other_event_pressed() -> Result<()> {
+        // Create a oneshot channel that represents some sort of cancellation button having been pressed.
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let cancel = async {
+            // The button press message indiciates that a timeout was requested
+            _ = rx.await;
+            anyhow::anyhow!("Cancel requested from the user")
+        };
+        // "Press" the button
+        tx.send(()).unwrap();
+
+        let radio = Radio::<Uninitialized>::new_init(2);
+        let expect_error_not_radio = try_enter_standby_until(radio, cancel).await;
+
+        assert!(expect_error_not_radio.is_err());
+        // message should be "Cancel requested from the user"
+        assert_eq!(
+            expect_error_not_radio.err().unwrap().to_string(),
+            "Cancel requested from the user"
+        );
         Ok(())
     }
 }
