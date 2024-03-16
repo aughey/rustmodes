@@ -10,7 +10,7 @@ struct Uninitialized;
 
 // The generic radio struct that will self-transition to different states
 pub struct Radio<State> {
-    /// Data internal to the radio, this is moved from state to state
+    /// Data internal to the radio, this is retained/moved from state to state
     data: RadioData,
     state: PhantomData<State>,
 }
