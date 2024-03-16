@@ -21,6 +21,15 @@ struct RadioData {
     _number: u32,
     _other: f64,
 }
+impl RadioData {
+    pub fn new(count: u32) -> Self {
+        RadioData {
+            init_count: count,
+            _number: 3,
+            _other: 0.14159,
+        }
+    }
+}
 
 /// An error struct that allows an error message to be reported along with the radio that caused it.
 /// This is necessary because mode transitions take ownership of the radio and return a new one, so
@@ -51,21 +60,13 @@ impl<T> std::error::Error for RadioError<T> {
 impl Radio<Uninitialized> {
     pub fn new() -> Self {
         Radio {
-            data: RadioData {
-                init_count: 0,
-                _number: 3,
-                _other: 0.14159,
-            },
+            data: RadioData::new(0),
             state: PhantomData,
         }
     }
     pub fn new_init(count: u32) -> Self {
         Radio {
-            data: RadioData {
-                init_count: count,
-                _number: 3,
-                _other: 0.14159,
-            },
+            data: RadioData::new(count),
             state: PhantomData,
         }
     }
@@ -73,6 +74,7 @@ impl Radio<Uninitialized> {
     /// Attempt to establish contact with the radio and entire standby if
     /// successful.
     pub async fn standby(mut self) -> Result<Radio<Standby>, RadioError<Self>> {
+        // We use this init_count to simulate a radio that might not be ready
         if self.data.init_count > 0 {
             self.data.init_count -= 1;
             return Err(RadioError {
@@ -80,10 +82,9 @@ impl Radio<Uninitialized> {
                 radio: self,
             });
         }
-        //println!("Radio is in Configure mode");
+
         // Perform configuration actions here
-        //tokio::time::sleep(Duration::from_secs(1)).await;
-        //println!("Configuration complete");
+
         Ok(Radio {
             data: self.data,
             state: PhantomData,
@@ -93,10 +94,9 @@ impl Radio<Uninitialized> {
 
 impl Radio<Configure> {
     pub async fn operate(self) -> Result<Radio<Operate>, RadioError<Self>> {
-        //println!("Radio is in Operate mode");
         // Perform operate actions here
         //tokio::time::sleep(Duration::from_secs(1)).await;
-        //println!("Operate mode enabled");
+
         Ok(Radio {
             data: self.data,
             state: PhantomData,
@@ -104,8 +104,8 @@ impl Radio<Configure> {
     }
     // and back to standby
     pub async fn enter_standby(self) -> Radio<Standby> {
-        //println!("Entering Standby mode");
         // Perform standby actions here
+
         Radio {
             data: self.data,
             state: PhantomData,
@@ -113,8 +113,14 @@ impl Radio<Configure> {
     }
 }
 
+#[derive(Default)]
+struct ConfigureData;
+
 impl Radio<Standby> {
-    pub async fn configure(self) -> Result<Radio<Configure>, RadioError<Self>> {
+    pub async fn configure(
+        self,
+        _configdata: ConfigureData,
+    ) -> Result<Radio<Configure>, RadioError<Self>> {
         //println!("Radio is in Configure mode");
         // Perform configuration actions here
         //tokio::time::sleep(Duration::from_secs(1)).await;
@@ -144,18 +150,31 @@ impl Radio<Operate> {
 
 #[cfg(test)]
 mod tests {
+    use std::{future::Future, time::Duration};
+
     use super::*;
 
+    /// Our radio, through this type system and ownership transfer, will transition from
+    ///
+    /// Uninitialized -> Standby -> Configure -> Operate
+    ///
+    /// It can also transition to Standby from both Configure and Operate.
+    ///
+    /// All transitions can fail and return the radio to the prior state.
+    /// (except going to standby, that always works)
     #[tokio::test]
     async fn test_radio() -> anyhow::Result<()> {
+        // Start in uninitialized.  This is the only way we can create a radio.
         let radio = Radio::<Uninitialized>::new();
         // Must transition to standby first
         let radio = radio.standby().await?;
         // Must transition to configure
-        let radio = radio.configure().await?;
+        let radio = radio.configure(ConfigureData::default()).await?;
         // From configure, we can transition to operate
         let radio = radio.operate().await?;
+        // Try sending data in operate mode
         radio.send_data(&[1, 2, 3]).await?;
+        // Done, go back to standby
         let _radio = radio.enter_standby().await;
         Ok(())
     }
@@ -190,10 +209,78 @@ mod tests {
             }
         };
         // in standby, go to configure
-        let radio = radio.configure().await?;
+        let radio = radio.configure(ConfigureData::default()).await?;
         let radio = radio.operate().await?;
         radio.send_data(&[1, 2, 3]).await?;
         let _radio = radio.enter_standby().await;
+        Ok(())
+    }
+
+    // Try to enter standby mode continuously until successful
+    async fn try_enter_standby(radio: Radio<Uninitialized>) -> Radio<Standby> {
+        // Loop as many times as needed to get into standby mode (it might not be ready)
+        let mut radio = radio;
+        loop {
+            // Try to go into standby
+            match radio.standby().await {
+                Ok(radio) => break radio,
+                Err(e) => {
+                    // Bad day, try again
+                    //println!("Error configuring radio: {}", e);
+                    // The prior radio is in the error struct, so pull it out and try again
+                    radio = e.radio;
+                }
+            }
+        }
+    }
+
+    /// Return type of wait_for_one_to_complete indicating which future completed before the other.
+    pub enum FirstOrSecond<A, B> {
+        First(A),
+        Second(B),
+    }
+
+    /// Wait for one of the two futures to complete and return which one completed first.
+    /// This is a wrapper around the select function from the futures crate for the common
+    /// case of returning just an output item - dropping both futures at the completion of one.
+    pub async fn wait_for_one_to_complete<Fut1, Fut2, Out1, Out2>(
+        fut1: Fut1,
+        fut2: Fut2,
+    ) -> FirstOrSecond<Out1, Out2>
+    where
+        Fut1: Future<Output = Out1>,
+        Fut2: Future<Output = Out2>,
+    {
+        use futures::future::{self, Either};
+        match future::select(std::pin::pin!(fut1), std::pin::pin!(fut2)).await {
+            Either::Left((value_1, _)) => FirstOrSecond::First(value_1),
+            Either::Right((value_2, _)) => FirstOrSecond::Second(value_2),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_looping_standby() -> Result<()> {
+        let radio = Radio::<Uninitialized>::new_init(2);
+        let _radio = try_enter_standby(radio).await;
+        Ok(())
+    }
+
+    async fn try_enter_standby_until<T>(
+        radio: Radio<Uninitialized>,
+        timeout: impl Future<Output = T>,
+    ) -> Result<Radio<Standby>> {
+        match wait_for_one_to_complete(try_enter_standby(radio), timeout).await {
+            FirstOrSecond::First(r) => Ok(r),
+            FirstOrSecond::Second(_) => Err(anyhow::anyhow!("Timeout waiting for standby")),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_timeout_standby() -> Result<()> {
+        let radio = Radio::<Uninitialized>::new_init(2);
+        let _radio =
+            try_enter_standby_until(radio, tokio::time::sleep(Duration::from_secs(5))).await?;
+
         Ok(())
     }
 }
