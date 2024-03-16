@@ -15,11 +15,11 @@ pub struct Radio<State> {
 }
 
 /// Data relevant to the radio, this might be sockets or other resources
-pub struct RadioData {
+struct RadioData {
     // notional data
-    pub number: u32,
-    pub init_count: u32,
-    pub other: f64,
+    init_count: u32,
+    _number: u32,
+    _other: f64,
 }
 
 /// An error struct that allows an error message to be reported along with the radio that caused it.
@@ -53,8 +53,8 @@ impl Radio<Uninitialized> {
         Radio {
             data: RadioData {
                 init_count: 0,
-                number: 3,
-                other: 0.14159,
+                _number: 3,
+                _other: 0.14159,
             },
             state: PhantomData,
         }
@@ -63,8 +63,8 @@ impl Radio<Uninitialized> {
         Radio {
             data: RadioData {
                 init_count: count,
-                number: 3,
-                other: 0.14159,
+                _number: 3,
+                _other: 0.14159,
             },
             state: PhantomData,
         }
@@ -162,19 +162,27 @@ mod tests {
 
     #[tokio::test]
     async fn show_looping_init() -> anyhow::Result<()> {
-        let mut radio = Radio::<Uninitialized>::new_init(2);
+        let radio = Radio::<Uninitialized>::new_init(2);
+
         // Loop as many times as needed to get into standby mode (it might not be ready)
         let radio = {
+            // keep track of how many times we try to init
             let mut init_count = 0;
+            // the radio variable needs to be mut to be updated in the loop
+            let mut radio = radio;
             loop {
+                // Try to go into standby
                 match radio.standby().await {
                     Ok(radio) => {
+                        // Successful, break out of the loop with the radio in standby
                         assert_eq!(init_count, 2);
                         break radio;
                     }
                     Err(e) => {
+                        // Bad day, try again
                         println!("Error configuring radio: {}", e);
                         //tokio::time::sleep(Duration::from_secs(1)).await;
+                        // The prior radio is in the error struct, so pull it out and try again
                         radio = e.radio;
                         init_count += 1;
                     }
