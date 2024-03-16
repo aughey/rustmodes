@@ -1,9 +1,10 @@
 use anyhow::Result;
-use std::marker::PhantomData;
 pub mod future_helper;
 
 // Define the different state types
-struct Configured;
+struct Configured {
+    config: ConfigureData,
+}
 struct Operate;
 struct Standby;
 struct Uninitialized;
@@ -12,7 +13,7 @@ struct Uninitialized;
 pub struct Radio<State> {
     /// Data internal to the radio, this is retained/moved from state to state
     data: RadioData,
-    state: PhantomData<State>,
+    state: State,
 }
 
 /// Data relevant to the radio, this might be sockets or other resources
@@ -62,14 +63,14 @@ impl Radio<Uninitialized> {
     pub fn new() -> Self {
         Radio {
             data: RadioData::new(0),
-            state: PhantomData,
+            state: Uninitialized,
         }
     }
     // For testing so I can simulate a radio that might not be ready
     pub fn new_init(count: u32) -> Self {
         Radio {
             data: RadioData::new(count),
-            state: PhantomData,
+            state: Uninitialized,
         }
     }
 
@@ -89,28 +90,28 @@ impl Radio<Uninitialized> {
 
         Ok(Radio {
             data: self.data,
-            state: PhantomData,
+            state: Standby,
         })
     }
 }
 
 /// Data that might be needed to configure the radio.
 /// Frequencies, power, etc.
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct ConfigureData;
 
 impl Radio<Standby> {
     /// Attempt to configure the radio with the given data
     pub async fn configure(
         self,
-        _configdata: ConfigureData,
+        configdata: ConfigureData,
     ) -> Result<Radio<Configured>, RadioError<Self>> {
         // Perform configuration actions here
         //tokio::time::sleep(Duration::from_secs(1)).await;
 
         Ok(Radio {
             data: self.data,
-            state: PhantomData,
+            state: Configured { config: configdata },
         })
     }
 }
@@ -120,10 +121,11 @@ impl Radio<Configured> {
     pub async fn operate(self) -> Result<Radio<Operate>, RadioError<Self>> {
         // Perform operate transition actions here
         //tokio::time::sleep(Duration::from_secs(1)).await;
+        println!("Configured to Operate: {:?}", self.state.config);
 
         Ok(Radio {
             data: self.data,
-            state: PhantomData,
+            state: Operate,
         })
     }
     // Can go back to standby without error (maybe need error given some other implementation).
@@ -132,7 +134,7 @@ impl Radio<Configured> {
 
         Radio {
             data: self.data,
-            state: PhantomData,
+            state: Standby,
         }
     }
 }
@@ -150,7 +152,7 @@ impl Radio<Operate> {
         // Perform standby actions here
         Radio {
             data: self.data,
-            state: PhantomData,
+            state: Standby,
         }
     }
 }
