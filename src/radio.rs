@@ -1,4 +1,7 @@
+use crate::ErrorPlus;
 use anyhow::Result;
+
+type RadioError<T> = ErrorPlus<T>;
 
 // Define the different state types
 pub struct Configured {
@@ -36,34 +39,6 @@ impl RadioData {
     }
 }
 
-/// An error struct that allows an error message to be reported along with the radio that caused it.
-/// This is necessary because mode transitions take ownership of the radio and return a new one, so
-/// if the transition fails, the original radio must be returned.
-pub struct RadioError<T> {
-    pub error: anyhow::Error,
-    pub radio: T,
-}
-
-// Implement the Display and Debug traits for RadioError<T> so that the error message can be printed
-// and proprogated up with ? in the fail condition.
-impl<T> std::fmt::Display for RadioError<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error.fmt(f)
-    }
-}
-
-impl<T> std::fmt::Debug for RadioError<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error.fmt(f)
-    }
-}
-
-impl<T> std::error::Error for RadioError<T> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-}
-
 impl Default for Radio<Uninitialized> {
     fn default() -> Self {
         Self::new()
@@ -93,7 +68,7 @@ impl Radio<Uninitialized> {
             self.data.init_count -= 1;
             return Err(RadioError {
                 error: anyhow::anyhow!("Radio not ready to configure"),
-                radio: self,
+                other: self,
             });
         }
 
@@ -224,7 +199,7 @@ mod tests {
                         println!("Error configuring radio: {}", e);
                         //tokio::time::sleep(Duration::from_secs(1)).await;
                         // The prior radio is in the error struct, so pull it out and try again
-                        radio = e.radio;
+                        radio = e.other;
                         init_count += 1;
                     }
                 }
@@ -252,7 +227,7 @@ mod tests {
                     // Necessary because we need to allow other tasks to run.
                     tokio::task::yield_now().await;
                     // The prior radio is in the error struct, so pull it out and try again
-                    radio = e.radio;
+                    radio = e.other;
                 }
             }
         }
