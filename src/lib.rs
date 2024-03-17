@@ -59,6 +59,12 @@ impl<T> std::error::Error for RadioError<T> {
     }
 }
 
+impl Default for Radio<Uninitialized> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Radio<Uninitialized> {
     pub fn new() -> Self {
         Radio {
