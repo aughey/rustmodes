@@ -1,7 +1,7 @@
 use crate::ErrorPlus;
 use anyhow::Result;
 
-type RadioError<T> = ErrorPlus<T>;
+type RadioError<T> = ErrorPlus<T, anyhow::Error>;
 
 // Define the different state types
 pub struct Configured {
