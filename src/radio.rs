@@ -4,17 +4,15 @@ use anyhow::Result;
 type RadioError<T> = ErrorPlus<T, anyhow::Error>;
 
 // Define the different state types
+pub struct Uninitialized;
 pub struct Configured {
     pub config: ConfigureData,
 }
-
 pub struct Operate;
-
 pub struct Standby;
 
-pub struct Uninitialized;
-
 // The generic radio struct that will self-transition to different states
+// Type state pattern
 pub struct Radio<State> {
     /// Data internal to the radio, this is retained/moved from state to state
     pub data: RadioData,
