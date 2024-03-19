@@ -1,5 +1,6 @@
 pub mod future_helper;
 pub mod radio;
+pub mod radio2;
 
 /// An error struct that allows an error message to be reported along with additional information.
 /// This is necessary to return an error, but we need to return other data, likely data that transferred
